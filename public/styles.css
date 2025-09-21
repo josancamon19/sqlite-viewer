@@ -69,6 +69,23 @@ label {
   font-size: 0.95rem;
 }
 
+.upload-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.upload-input button {
+  flex-shrink: 0;
+}
+
+.upload-input .upload-hint {
+  font-size: 0.78rem;
+  color: rgba(0, 0, 0, 0.55);
+}
+
 button {
   cursor: pointer;
   border: none;
@@ -237,6 +254,7 @@ button.minimal:hover {
   border-collapse: collapse;
   width: 100%;
   background: #fff;
+  table-layout: fixed;
 }
 
 .table-grid th,
@@ -245,6 +263,15 @@ button.minimal:hover {
   padding: 8px 12px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   vertical-align: top;
+}
+
+.table-grid th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  z-index: 2;
+  text-align: left;
+  font-weight: 600;
 }
 
 .table-grid th.column-index,
@@ -277,13 +304,46 @@ button.minimal:hover {
   white-space: nowrap;
 }
 
-.table-grid th {
-  position: sticky;
+.table-grid th.resizing,
+.table-grid td.resizing {
+  user-select: none;
+}
+
+.table-grid th .column-resizer {
+  position: absolute;
   top: 0;
-  background: #f8fafc;
-  z-index: 1;
-  text-align: left;
-  font-weight: 600;
+  right: 0;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 2px;
+}
+
+.table-grid th .column-resizer::after {
+  content: '';
+  width: 2px;
+  height: 60%;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.6);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.table-grid th:hover .column-resizer::after,
+.table-grid th.resizing .column-resizer::after {
+  opacity: 1;
+}
+
+body.resizing-columns {
+  cursor: col-resize;
+}
+
+body.resizing-columns * {
+  user-select: none !important;
+  cursor: col-resize;
 }
 
 .table-grid tbody tr:nth-child(odd) td {

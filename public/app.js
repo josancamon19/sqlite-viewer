@@ -9,6 +9,7 @@ const state = {
   orderDir: 'asc',
   rowCount: 0,
   hasRowid: false,
+  columnWidths: {},
 };
 
 const els = {
@@ -20,6 +21,8 @@ const els = {
   refreshTables: document.querySelector('#refresh-tables'),
   tableMeta: document.querySelector('#table-meta'),
   tableData: document.querySelector('#table-data'),
+  uploadButton: document.querySelector('#upload-button'),
+  fileInput: document.querySelector('#db-file'),
   modal: document.querySelector('#modal'),
   modalTitle: document.querySelector('#modal-title'),
   modalBody: document.querySelector('#modal-body'),
@@ -28,20 +31,30 @@ const els = {
 
 const LIMIT_OPTIONS = [25, 50, 100, 250, 500];
 
-async function fetchJSON(url, options) {
-  const response = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    ...options,
-  });
+async function fetchJSON(url, options = {}) {
+  const opts = { ...options };
+  const headers = new Headers(opts.headers || {});
+  const isFormData = opts.body instanceof FormData;
+  if (!isFormData && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  opts.headers = headers;
+
+  const response = await fetch(url, opts);
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      data = null;
+    }
+  }
   if (!response.ok) {
-    const message = data && data.error ? data.error : response.statusText;
+    const message = data && data.error ? data.error : (text || response.statusText);
     throw new Error(message || 'Request failed');
   }
-  return data;
+  return data ?? {};
 }
 
 function updateStatus(status) {
@@ -215,13 +228,39 @@ function renderRows(data) {
   tableWrapper.className = 'data-table-wrapper';
   const table = document.createElement('table');
   table.className = 'table-grid';
+  table.dataset.table = state.selectedTable || '';
+
+  const descriptors = [];
+  const addDescriptor = (descriptor) => {
+    const id = `col-${descriptors.length}`;
+    descriptors.push({ ...descriptor, id });
+  };
+
+  addDescriptor({ key: '__index__', label: '#', className: 'column-index', minWidth: 56 });
+  if (data.hasRowid) {
+    addDescriptor({ key: '__rowid__', label: 'rowid', className: 'column-rowid', minWidth: 88 });
+  }
+  for (const column of data.columns) {
+    addDescriptor({ key: column, label: column, minWidth: 120 });
+  }
+
+  const colgroup = document.createElement('colgroup');
+  for (const descriptor of descriptors) {
+    const colEl = document.createElement('col');
+    colEl.dataset.colId = descriptor.id;
+    const storedWidth = state.columnWidths[descriptor.key];
+    if (Number.isFinite(storedWidth)) {
+      colEl.style.width = `${storedWidth}px`;
+    }
+    colgroup.appendChild(colEl);
+  }
+  table.appendChild(colgroup);
 
   const thead = document.createElement('thead');
   const headRow = document.createElement('tr');
-  headRow.appendChild(createHeaderCell('#', 'column-index'));
-  if (data.hasRowid) headRow.appendChild(createHeaderCell('rowid', 'column-rowid'));
-  for (const column of data.columns) {
-    headRow.appendChild(createHeaderCell(column));
+  for (const descriptor of descriptors) {
+    const th = createHeaderCell(descriptor, table);
+    headRow.appendChild(th);
   }
   thead.appendChild(headRow);
   table.appendChild(thead);
@@ -230,20 +269,23 @@ function renderRows(data) {
   if (!data.rows.length) {
     const emptyRow = document.createElement('tr');
     const emptyCell = document.createElement('td');
-    emptyCell.colSpan = data.columns.length + (data.hasRowid ? 2 : 1);
+    emptyCell.colSpan = descriptors.length;
     emptyCell.textContent = 'No rows found.';
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
   } else {
     for (const row of data.rows) {
       const tr = document.createElement('tr');
-      tr.appendChild(createCell(String(row.offset + 1), 'column-index'));
-      if (data.hasRowid) {
-        tr.appendChild(createCell(row.rowid != null ? String(row.rowid) : '', 'column-rowid')); 
-      }
-      for (const column of data.columns) {
-        const cellData = row.cells[column];
-        tr.appendChild(createDataCell(column, cellData, row));
+      for (const descriptor of descriptors) {
+        if (descriptor.key === '__index__') {
+          tr.appendChild(createCell(descriptor, String(row.offset + 1)));
+        } else if (descriptor.key === '__rowid__') {
+          const value = row.rowid != null ? String(row.rowid) : '';
+          tr.appendChild(createCell(descriptor, value));
+        } else {
+          const cellData = row.cells[descriptor.key];
+          tr.appendChild(createDataCell(descriptor, cellData, row));
+        }
       }
       tbody.appendChild(tr);
     }
@@ -278,33 +320,58 @@ function renderRows(data) {
   els.tableData.appendChild(pager);
 }
 
-function createHeaderCell(label, className) {
+function createHeaderCell(descriptor, table) {
   const th = document.createElement('th');
-  th.textContent = label;
-  if (className) th.classList.add(className);
+  th.textContent = descriptor.label;
+  if (descriptor.className) th.classList.add(descriptor.className);
+  th.dataset.colId = descriptor.id;
+  const storedWidth = state.columnWidths[descriptor.key];
+  if (Number.isFinite(storedWidth)) {
+    th.style.width = `${storedWidth}px`;
+  }
+  if (descriptor.resizable !== false) {
+    attachColumnResizer(th, descriptor, table);
+  }
   return th;
 }
 
-function createCell(content, className) {
+function createCell(descriptor, content) {
   const td = document.createElement('td');
+  if (descriptor.className) td.classList.add(descriptor.className);
+  td.dataset.colId = descriptor.id;
+  const storedWidth = state.columnWidths[descriptor.key];
+  if (Number.isFinite(storedWidth)) {
+    td.style.width = `${storedWidth}px`;
+  }
   td.textContent = content;
-  if (className) td.classList.add(className);
   return td;
 }
 
-function createDataCell(columnName, cellData, row) {
+function createDataCell(descriptor, cellData, row) {
   const td = document.createElement('td');
-  if (cellData.kind === 'number') {
+  td.dataset.colId = descriptor.id;
+  const storedWidth = state.columnWidths[descriptor.key];
+  if (Number.isFinite(storedWidth)) {
+    td.style.width = `${storedWidth}px`;
+  }
+  if (cellData?.kind === 'number') {
     td.classList.add('cell-number');
   }
   const wrapper = document.createElement('div');
   wrapper.className = 'cell-content';
 
-  const metaText = renderMetaText(cellData);
+  const metaText = cellData ? renderMetaText(cellData) : null;
   const meta = document.createElement('div');
   meta.className = 'cell-meta';
   if (metaText) {
     meta.textContent = metaText;
+  }
+
+  if (!cellData) {
+    wrapper.textContent = '';
+    td.append(wrapper);
+    if (metaText) td.append(meta);
+    return td;
   }
 
   if (cellData.kind === 'null') {
@@ -327,7 +394,7 @@ function createDataCell(columnName, cellData, row) {
     td.append(wrapper);
     if (metaText) td.append(meta);
     if (cellData.hasMore) {
-      td.append(createExpandButton(columnName, row));
+      td.append(createExpandButton(descriptor.key, row));
     }
     return td;
   }
@@ -336,15 +403,72 @@ function createDataCell(columnName, cellData, row) {
     wrapper.textContent = formatBlobPreview(cellData);
     td.append(wrapper);
     if (metaText) td.append(meta);
-    td.append(createExpandButton(columnName, row));
+    td.append(createExpandButton(descriptor.key, row));
     return td;
   }
 
   wrapper.textContent = cellData.preview ?? '';
   td.append(wrapper);
   if (metaText) td.append(meta);
-  if (cellData.hasMore) td.append(createExpandButton(columnName, row));
+  if (cellData.hasMore) td.append(createExpandButton(descriptor.key, row));
   return td;
+}
+
+function attachColumnResizer(th, descriptor, table) {
+  const resizer = document.createElement('span');
+  resizer.className = 'column-resizer';
+  resizer.title = 'Drag to resize';
+  resizer.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.pageX;
+    const initialWidth = Number.isFinite(state.columnWidths[descriptor.key])
+      ? state.columnWidths[descriptor.key]
+      : th.getBoundingClientRect().width;
+    const minWidth = descriptor.minWidth || 80;
+
+    const baselineWidth = Math.max(minWidth, initialWidth);
+
+    state.columnWidths[descriptor.key] = baselineWidth;
+    applyColumnWidth(table, descriptor, baselineWidth);
+    document.body.classList.add('resizing-columns');
+    table.classList.add('is-resizing');
+
+    const onMouseMove = (moveEvent) => {
+      const delta = moveEvent.pageX - startX;
+      const nextWidth = Math.max(minWidth, baselineWidth + delta);
+      state.columnWidths[descriptor.key] = nextWidth;
+      applyColumnWidth(table, descriptor, nextWidth);
+      th.classList.add('resizing');
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      th.classList.remove('resizing');
+      table.classList.remove('is-resizing');
+      document.body.classList.remove('resizing-columns');
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+  th.appendChild(resizer);
+}
+
+function applyColumnWidth(table, descriptor, width) {
+  if (!Number.isFinite(width)) return;
+  const resolved = `${Math.max(40, Math.round(width))}px`;
+  const col = table.querySelector(`col[data-col-id="${descriptor.id}"]`);
+  if (col) {
+    col.style.width = resolved;
+  }
+  table
+    .querySelectorAll(`th[data-col-id="${descriptor.id}"], td[data-col-id="${descriptor.id}"]`)
+    .forEach((cell) => {
+      cell.style.width = resolved;
+    });
 }
 
 function renderMetaText(cellData) {
@@ -470,6 +594,7 @@ async function refreshStatus() {
     } else {
       state.tables = [];
       state.selectedTable = null;
+      state.columnWidths = {};
       renderTables();
       els.tableData.classList.add('placeholder');
       els.tableData.innerHTML = '<p>Select a table to view its rows.</p>';
@@ -499,6 +624,7 @@ async function selectTable(name) {
   state.offset = 0;
   state.orderBy = null;
   state.orderDir = 'asc';
+  state.columnWidths = {};
   renderTables();
   await loadTableDetails();
 }
@@ -552,9 +678,40 @@ async function handleOpen(event) {
   }
 }
 
+async function handleUploadFile(file) {
+  if (!file) return;
+  els.statusText.textContent = `Uploading ${file.name}…`;
+  els.statusHint.textContent = 'Processing upload';
+  els.uploadButton.disabled = true;
+  try {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const data = await fetchJSON('/api/upload', {
+      method: 'POST',
+      body: form,
+    });
+    els.statusText.textContent = `Uploaded: ${data.filename || file.name}`;
+    els.statusHint.textContent = 'Database loaded from uploaded file.';
+    await refreshStatus();
+  } catch (err) {
+    els.statusText.textContent = `Upload error: ${err.message}`;
+    els.statusHint.textContent = '';
+  } finally {
+    els.uploadButton.disabled = false;
+    els.fileInput.value = '';
+  }
+}
+
 function setupListeners() {
   els.form.addEventListener('submit', handleOpen);
   els.refreshTables.addEventListener('click', loadTables);
+  els.uploadButton.addEventListener('click', () => els.fileInput.click());
+  els.fileInput.addEventListener('change', (event) => {
+    const [file] = event.target.files;
+    if (file) {
+      handleUploadFile(file);
+    }
+  });
   els.modalClose.addEventListener('click', closeModal);
   els.modal.addEventListener('click', (event) => {
     if (event.target === els.modal) {

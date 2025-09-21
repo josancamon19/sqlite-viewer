@@ -17,6 +17,11 @@
               <input id="db-path" name="path" type="text" placeholder="/path/to/database.db" />
               <button type="submit">Open</button>
             </div>
+            <div class="upload-input">
+              <input id="db-file" type="file" accept=".db,.sqlite,.sqlite3,.db3,.sqlite,.sqlite2,.sqlite4,application/octet-stream" hidden />
+              <button type="button" id="upload-button">Upload Database…</button>
+              <span class="upload-hint">Uploads stay local to the server session.</span>
+            </div>
             <p id="status-text" class="status">No database loaded</p>
             <p id="status-hint" class="status-hint"></p>
           </form>

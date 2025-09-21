@@ -6,16 +6,21 @@ import json
 import os
 import sqlite3
 import threading
+import time
+import shutil
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+import cgi
+
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
 DATA_DIR = ROOT / "data"
 STATE_FILE = DATA_DIR / "active_db.json"
+UPLOADS_DIR = DATA_DIR / "uploads"
 
 _lock = threading.Lock()
 _connection: Optional[sqlite3.Connection] = None
@@ -27,6 +32,7 @@ _table_has_rowid_cache: Dict[str, bool] = {}
 
 def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_state() -> None:
@@ -269,6 +275,94 @@ def handle_post_open(handler: "ApiRequestHandler") -> None:
     handler.respond_json({"ok": True, "dbPath": _current_db_path})
 
 
+def handle_post_upload(handler: "ApiRequestHandler") -> None:
+    content_type = handler.headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type:
+        handler.respond_json(
+            {"error": "Expected multipart/form-data"}, status=HTTPStatus.BAD_REQUEST
+        )
+        return
+
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": content_type,
+    }
+    content_length = handler.headers.get("Content-Length")
+    if content_length is not None:
+        environ["CONTENT_LENGTH"] = content_length
+        try:
+            length_value = int(content_length)
+        except ValueError:
+            handler.respond_json({"error": "Invalid Content-Length"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        max_upload_bytes = 32 * 1024 * 1024
+        if length_value > max_upload_bytes:
+            handler.respond_json(
+                {"error": "Upload too large for this service (32 MB maximum)."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+    try:
+        form = cgi.FieldStorage(
+            fp=handler.rfile,
+            headers=handler.headers,
+            environ=environ,
+            keep_blank_values=True,
+        )
+    except (ValueError, OSError) as exc:
+        handler.respond_json({"error": f"Failed to parse upload: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+        return
+
+    if "file" not in form:
+        handler.respond_json({"error": "Missing file"}, status=HTTPStatus.BAD_REQUEST)
+        return
+
+    file_field = form["file"]
+    if isinstance(file_field, list):
+        file_item = next((item for item in file_field if getattr(item, "filename", None)), file_field[0])
+    else:
+        file_item = file_field
+
+    filename = getattr(file_item, "filename", None)
+    if not filename:
+        handler.respond_json({"error": "Missing file"}, status=HTTPStatus.BAD_REQUEST)
+        return
+
+    original_name = Path(filename).name
+    if not original_name:
+        original_name = "database.db"
+
+    timestamp = int(time.time())
+    safe_name = f"{timestamp}_{original_name}"
+    destination = UPLOADS_DIR / safe_name
+
+    try:
+        file_item.file.seek(0)
+        with destination.open("wb") as target:
+            shutil.copyfileobj(file_item.file, target, length=1024 * 1024)
+    except OSError as exc:
+        handler.respond_json({"error": f"Failed to store upload: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return
+
+    try:
+        connect_to_db(str(destination))
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        handler.respond_json({"error": f"Unable to open database: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+        return
+
+    handler.respond_json(
+        {
+            "ok": True,
+            "dbPath": _current_db_path,
+            "filename": original_name,
+            "storedAs": str(destination),
+            "size": destination.stat().st_size,
+        }
+    )
+
+
 def handle_get_tables(handler: "ApiRequestHandler") -> None:
     try:
         conn = _require_connection()
@@ -485,6 +579,8 @@ class ApiRequestHandler(SimpleHTTPRequestHandler):
         try:
             if parts == ["api", "open"]:
                 handle_post_open(self)
+            elif parts == ["api", "upload"]:
+                handle_post_upload(self)
             else:
                 self.respond_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
